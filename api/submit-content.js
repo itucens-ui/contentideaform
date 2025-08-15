@@ -1,8 +1,6 @@
-// api/submit-content.js - Vercel serverless function
-// This handles form submissions and adds them to your Notion database
-
+// api/submit-content.js - Fixed version for Vercel
 export default async function handler(req, res) {
-  // Enable CORS for your domain
+  // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -32,8 +30,9 @@ export default async function handler(req, res) {
     const NOTION_TOKEN = process.env.NOTION_TOKEN;
     
     if (!NOTION_TOKEN) {
+      console.error('NOTION_TOKEN not found in environment variables');
       return res.status(500).json({ 
-        error: 'Notion token not configured' 
+        error: 'Server configuration error - missing Notion token' 
       });
     }
 
@@ -66,17 +65,19 @@ export default async function handler(req, res) {
     };
 
     // Add notes if provided
-    if (notes) {
+    if (notes && notes.trim()) {
       notionData.properties["Notes"] = {
         rich_text: [
           {
             text: {
-              content: notes
+              content: notes.trim()
             }
           }
         ]
       };
     }
+
+    console.log('Sending to Notion:', JSON.stringify(notionData, null, 2));
 
     // Send to Notion API
     const response = await fetch('https://api.notion.com/v1/pages', {
@@ -89,16 +90,19 @@ export default async function handler(req, res) {
       body: JSON.stringify(notionData)
     });
 
+    const responseText = await response.text();
+    console.log('Notion API response:', response.status, responseText);
+
     if (!response.ok) {
-      const errorData = await response.text();
-      console.error('Notion API Error:', errorData);
+      console.error('Notion API Error:', response.status, responseText);
       return res.status(500).json({ 
         error: 'Failed to create Notion page',
-        details: errorData
+        details: responseText,
+        status: response.status
       });
     }
 
-    const result = await response.json();
+    const result = JSON.parse(responseText);
     
     return res.status(200).json({ 
       success: true, 
@@ -108,7 +112,7 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Server Error:', error);
     return res.status(500).json({ 
       error: 'Internal server error',
       details: error.message 
