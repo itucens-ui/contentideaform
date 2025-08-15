@@ -1,228 +1,6 @@
-<html lang="en"><head>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-    <script>
-      (function() {
-        const originalConsole = window.console;
-        window.console = {
-          log: (...args) => {
-            originalConsole.log(...args);
-            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
-          },
-          error: (...args) => {
-            originalConsole.error(...args);
-            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
-          },
-          warn: (...args) => {
-            originalConsole.warn(...args);
-            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
-          }
-        };
-
-        let requestId = 0;
-        let callbacksMap = new Map();
-        let streamControllers = new Map();
-        
-        window.claude = {
-          complete: (prompt) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
-            });
-          }
-        };
-
-        let pendingBlobs = new Map();
-        URL.createObjectURL = (blob) => {
-          // Store the blob and create an ID and URL for it
-          const blobId = `blob-${Date.now()}-${Math.random()}`;
-          pendingBlobs.set(blobId, blob);
-          return `blob-request://${blobId}`;
-        };
-
-        URL.revokeObjectURL = (url) => {
-          // Remove the blob from our store
-          const blobId = url.replace("blob-request://", "");
-          pendingBlobs.delete(blobId);
-        };
-
-        const getBlobFromURL = (url) => {
-          const blobId = url.replace("blob-request://", "");
-          return pendingBlobs.get(blobId);
-        };
-
-        // Override global fetch with streaming support
-        window.fetch = (url, init = {}) => {
-          return new Promise((resolve, reject) => {
-            const id = requestId++;
-            const channelId = `fetch-${id}-${Date.now()}`;
-            
-            callbacksMap.set(id, { 
-              resolve: (response) => {
-                // Create a ReadableStream for the response body
-                const stream = new ReadableStream({
-                  start(controller) {
-                    streamControllers.set(channelId, controller);
-                  },
-                  cancel() {
-                    streamControllers.delete(channelId);
-                  }
-                });
-                
-                // Create and return the Response with the stream
-                resolve(new Response(stream, {
-                  status: response.status,
-                  statusText: response.statusText,
-                  headers: response.headers
-                }));
-              },
-              reject,
-              channelId
-            });
-            
-            window.parent.postMessage({
-              type: 'proxyFetch',
-              id,
-              url,
-              init,
-              channelId
-            }, '*');
-          });
-        };
-
-        window.addEventListener('message', async (event) => {
-          if (event.data.type === 'takeScreenshot') {
-            const rootElement = document.getElementById('artifacts-component-root-html');
-            if (!rootElement) {
-              window.parent.postMessage({
-                type: 'screenshotError',
-                error: new Error('Root element not found'),
-              }, '*');
-            }
-            const screenshot = await htmlToImage.toPng(rootElement, {
-              imagePlaceholder:
-                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
-            });
-            window.parent.postMessage({
-              type: 'screenshotData',
-              data: screenshot,
-            }, '*');
-          } else if (event.data.type === 'claudeComplete') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.completion);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'proxyFetchResponse') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-              callbacksMap.delete(event.data.id);
-            } else {
-              // Initial response with headers, status, etc.
-              callback.resolve({
-                status: event.data.status,
-                statusText: event.data.statusText,
-                headers: event.data.headers
-              });
-              // Don't delete the callback yet if streaming
-              if (!event.data.body) {
-                callbacksMap.delete(event.data.id);
-              }
-            }
-          } else if (event.data.type === 'proxyFetchStream') {
-            // Handle streaming data chunks
-            const controller = streamControllers.get(event.data.channelId);
-            if (controller) {
-              if (event.data.error) {
-                controller.error(new Error(event.data.error));
-                streamControllers.delete(event.data.channelId);
-              } else if (event.data.done) {
-                controller.close();
-                streamControllers.delete(event.data.channelId);
-                // Clean up the callback
-                const callback = Array.from(callbacksMap.entries()).find(
-                  ([_, value]) => value.channelId === event.data.channelId
-                );
-                if (callback) {
-                  callbacksMap.delete(callback[0]);
-                }
-              } else if (event.data.chunk) {
-                controller.enqueue(new Uint8Array(event.data.chunk));
-              }
-            }
-          }
-        });
-
-        window.addEventListener('click', (event) => {
-          const isEl = event.target instanceof HTMLElement;
-          if (!isEl) return;
-    
-          // find ancestor links
-          const linkEl = event.target.closest("a");
-          if (!linkEl || !linkEl.href) return;
-    
-          event.preventDefault();
-          event.stopImmediatePropagation();
-    
-          if (linkEl.href.startsWith("blob-request:")) {
-            const blob = getBlobFromURL(linkEl.href);
-            if (!blob) return;
-            void blob.arrayBuffer().then((data) => {
-              window.parent.postMessage({
-                type: "downloadFile",
-                filename: linkEl.download,
-                data,
-                mimeType: blob.type || "application/octet-stream",
-              });
-            });
-          } else if (linkEl.href.startsWith("data:")) {
-            const [header, base64Data] = linkEl.href.split(",");
-            const mimeMatch = header.match(/data:([^;]+)/);
-            const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
-            const binaryString = atob(base64Data);
-            const data = Uint8Array.from(binaryString, (c) =>
-              c.charCodeAt(0),
-            ).buffer;
-            window.parent.postMessage({
-              type: "downloadFile",
-              filename: linkEl.download,
-              data,
-              mimeType,
-            });
-          } else {
-            let linkUrl;
-            try {
-              linkUrl = new URL(linkEl.href);
-            } catch (error) {
-              return;
-            }
-    
-            if (linkUrl.hostname === window.location.hostname) return;
-      
-            window.parent.postMessage({
-              type: 'openExternal',
-              href: linkEl.href,
-            }, '*');
-          }
-      });
-
-        const originalOpen = window.open;
-        window.open = function (url) {
-          window.parent.postMessage({
-            type: "openExternal",
-            href: url,
-          }, "*");
-        };
-
-        window.addEventListener('error', (event) => {
-          window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*');
-        });
-      })();
-    </script>
-  
+<!DOCTYPE html>
+<html lang="en">
+<head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Content Idea Capture</title>
@@ -248,7 +26,7 @@
             border-radius: 20px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
             padding: 40px;
-            max-width: 700px;
+            max-width: 600px;
             width: 100%;
             position: relative;
             overflow: hidden;
@@ -268,7 +46,7 @@
 
         .header {
             text-align: center;
-            margin-bottom: 35px;
+            margin-bottom: 30px;
         }
 
         .header h1 {
@@ -283,47 +61,6 @@
             color: #718096;
             font-size: 18px;
             line-height: 1.4;
-        }
-
-        .export-section {
-            background: #f8f9fa;
-            border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 20px;
-            text-align: center;
-        }
-
-        .export-buttons {
-            display: flex;
-            gap: 10px;
-            justify-content: center;
-            flex-wrap: wrap;
-            margin-top: 15px;
-        }
-
-        .export-btn {
-            padding: 8px 16px;
-            background: #FF7EC0;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .export-btn:hover {
-            background: #FF6BB3;
-            transform: translateY(-1px);
-        }
-
-        .export-btn:active {
-            transform: translateY(0);
         }
 
         .form-group {
@@ -447,33 +184,6 @@
             font-weight: 600;
         }
 
-        .form-section {
-            background: #f8f9fa;
-            border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-
-        .form-section h3 {
-            color: #2d3748;
-            font-size: 16px;
-            margin-bottom: 15px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .icon {
-            width: 20px;
-            height: 20px;
-        }
-
-        .helper-text {
-            font-size: 12px;
-            color: #718096;
-            margin-top: 4px;
-        }
-
         .notion-link {
             display: inline-block;
             margin-top: 10px;
@@ -575,11 +285,6 @@
                 grid-template-columns: 1fr;
                 gap: 0;
             }
-            
-            .export-buttons {
-                flex-direction: column;
-                align-items: center;
-            }
 
             .container {
                 margin: 20px;
@@ -589,7 +294,7 @@
         }
     </style>
 </head>
-<body id="artifacts-component-root-html">
+<body>
     <div class="container">
         <div class="form-container" id="formContainer">
             <div class="header">
@@ -597,37 +302,9 @@
                 <p>Add new content ideas directly to your Notion Content Notebook</p>
             </div>
 
-            <div class="export-section">
-                <h3>🚀 Export &amp; Setup Options</h3>
-                <p>Save this form and set up the Notion connection</p>
-                <div class="export-buttons">
-                    <button class="export-btn" onclick="downloadHTML()">
-                        💾 Download Form
-                    </button>
-                    <button class="export-btn" onclick="copyHTMLCode()">
-                        📋 Copy HTML Code
-                    </button>
-                    <button class="export-btn" onclick="openInNewTab()">
-                        🔗 Open in New Tab
-                    </button>
-                    <button class="export-btn" onclick="showSetupInstructions()">
-                        ⚙️ Setup Guide
-                    </button>
-                </div>
-                <div id="setupInstructions" style="display: none; margin-top: 15px; padding: 15px; background: #e8f4fd; border-radius: 8px; text-align: left;">
-                    <h4>🔧 To Connect Form to Notion:</h4>
-                    <ol style="margin: 10px 0; padding-left: 20px;">
-                        <li><strong>Option A:</strong> Set up a webhook service (Zapier, Make.com, or custom)</li>
-                        <li><strong>Option B:</strong> Use the console method - submit form, copy data, send to Claude</li>
-                        <li><strong>Option C:</strong> Host this form on a server with Notion API access</li>
-                    </ol>
-                    <p><strong>For now:</strong> Form captures data locally. Check browser console after submitting!</p>
-                </div>
-            </div>
-
             <div class="success-message" id="successMessage">
                 ✨ Content idea added successfully to your Notion workspace!
-                <a href="https://notion.so/1cb71346f26d81d69f66d3e940afcf71" target="_blank" class="notion-link">
+                <a href="https://www.notion.so/Content-notebook-1cb71346f26d81be8f54e00754ee5fd7?source=copy_link" target="_blank" class="notion-link">
                     View in Notion →
                 </a>
             </div>
@@ -637,59 +314,48 @@
             </div>
 
             <form id="contentForm">
-                <div class="form-section">
-                    <h3>
-                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
-                            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"></path>
-                        </svg>
-                        Content Details
-                    </h3>
-                    
+                <div class="form-group">
+                    <label for="contentTitle">Content Name <span class="required">*</span></label>
+                    <input type="text" id="contentTitle" class="form-control" placeholder="What's your content idea called?" required>
+                </div>
+
+                <div class="form-row">
                     <div class="form-group">
-                        <label for="contentTitle">Content Name <span class="required">*</span></label>
-                        <input type="text" id="contentTitle" class="form-control" placeholder="What's your content idea called?" required="">
-                        <div class="helper-text">Name or headline of your content piece</div>
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="channel">Channel <span class="required">*</span></label>
-                            <select id="channel" class="form-control" required="">
-                                <option value="">Select channel...</option>
-                                <option value="Instagram">Instagram</option>
-                                <option value="YouTube">YouTube</option>
-                                <option value="TikTok">TikTok</option>
-                                <option value="Pinterest">Pinterest</option>
-                                <option value="Facebook">Facebook</option>
-                                <option value="Newsletter">Newsletter</option>
-                                <option value="Blog">Blog</option>
-                                <option value="Podcast">Podcast</option>
-                            </select>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="contentType">Format <span class="required">*</span></label>
-                            <select id="contentType" class="form-control" required="">
-                                <option value="">Select format...</option>
-                                <option value="Single post">Single Post</option>
-                                <option value="Carousel">Carousel</option>
-                                <option value="Short-form video">Short-form Video</option>
-                                <option value="Long-form video">Long-form Video</option>
-                                <option value="Newsletter">Newsletter</option>
-                                <option value="Blog post">Blog Post</option>
-                                <option value="Podcast episode">Podcast Episode</option>
-                                <option value="Static pin">Static Pin</option>
-                                <option value="Video pin">Video Pin</option>
-                                <option value="Idea pin">Idea Pin</option>
-                            </select>
-                        </div>
+                        <label for="channel">Channel <span class="required">*</span></label>
+                        <select id="channel" class="form-control" required>
+                            <option value="">Select channel...</option>
+                            <option value="Instagram">Instagram</option>
+                            <option value="YouTube">YouTube</option>
+                            <option value="TikTok">TikTok</option>
+                            <option value="Pinterest">Pinterest</option>
+                            <option value="Facebook">Facebook</option>
+                            <option value="Newsletter">Newsletter</option>
+                            <option value="Blog">Blog</option>
+                            <option value="Podcast">Podcast</option>
+                        </select>
                     </div>
 
                     <div class="form-group">
-                        <label for="notes">Notes</label>
-                        <textarea id="notes" class="form-control" placeholder="Add any notes about your content idea - inspiration links, your unique angle, talking points, etc."></textarea>
-                        <div class="helper-text">Capture your thoughts, inspiration links, and how you'll make this content uniquely yours</div>
+                        <label for="contentType">Format <span class="required">*</span></label>
+                        <select id="contentType" class="form-control" required>
+                            <option value="">Select format...</option>
+                            <option value="Single post">Single Post</option>
+                            <option value="Carousel">Carousel</option>
+                            <option value="Short-form video">Short-form Video</option>
+                            <option value="Long-form video">Long-form Video</option>
+                            <option value="Newsletter">Newsletter</option>
+                            <option value="Blog post">Blog Post</option>
+                            <option value="Podcast episode">Podcast Episode</option>
+                            <option value="Static pin">Static Pin</option>
+                            <option value="Video pin">Video Pin</option>
+                            <option value="Idea pin">Idea Pin</option>
+                        </select>
                     </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="notes">Notes</label>
+                    <textarea id="notes" class="form-control" placeholder="Add any notes about your content idea - inspiration links, your unique angle, talking points, etc."></textarea>
                 </div>
 
                 <button type="submit" class="submit-btn" id="submitBtn">
@@ -740,54 +406,6 @@
         function showConfirmation() {
             formContainer.classList.add('hide');
             confirmationPage.classList.add('show');
-        }
-
-        // Export functionality
-        function downloadHTML() {
-            const htmlContent = document.documentElement.outerHTML;
-            const blob = new Blob([htmlContent], { type: 'text/html' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'content-idea-capture-form.html';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-        }
-
-        function copyHTMLCode() {
-            const htmlContent = document.documentElement.outerHTML;
-            navigator.clipboard.writeText(htmlContent).then(() => {
-                alert('✅ HTML code copied to clipboard! You can now paste it into any text editor and save as .html file.');
-            }).catch(() => {
-                // Fallback for browsers that don't support clipboard API
-                const textArea = document.createElement('textarea');
-                textArea.value = htmlContent;
-                document.body.appendChild(textArea);
-                textArea.select();
-                document.execCommand('copy');
-                document.body.removeChild(textArea);
-                alert('✅ HTML code copied to clipboard!');
-            });
-        }
-
-        function openInNewTab() {
-            // Use window.open with about:blank and then write content
-            const newWindow = window.open('about:blank', '_blank');
-            if (newWindow) {
-                const htmlContent = document.documentElement.outerHTML;
-                newWindow.document.open();
-                newWindow.document.write(htmlContent);
-                newWindow.document.close();
-            } else {
-                alert('Pop-up blocked! Please allow pop-ups for this site and try again.');
-            }
-        }
-
-        function showSetupInstructions() {
-            const instructions = document.getElementById('setupInstructions');
-            instructions.style.display = instructions.style.display === 'none' ? 'block' : 'none';
         }
 
         // Update content type options based on channel selection
@@ -872,8 +490,8 @@
         // Function to add content idea directly to your Notion Content database
         async function addToNotion(data) {
             try {
-                // Replace this URL with your deployed Vercel URL
-                const API_ENDPOINT = 'https://your-app-name.vercel.app/api/submit-content';
+                // Updated with your actual Vercel URL
+                const API_ENDPOINT = 'https://contentideaform.vercel.app/api/submit-content';
                 
                 const response = await fetch(API_ENDPOINT, {
                     method: 'POST',
@@ -929,26 +547,6 @@
             }
         }
 
-        // Function to get all stored ideas for batch processing
-        function getStoredIdeas() {
-            const ideas = JSON.parse(localStorage.getItem('contentIdeas') || '[]');
-            const unprocessed = ideas.filter(idea => !idea.processed);
-            
-            if (unprocessed.length > 0) {
-                console.log(`📋 You have ${unprocessed.length} content ideas ready for Notion:`);
-                unprocessed.forEach((idea, index) => {
-                    console.log(`\n--- Idea ${index + 1} ---`);
-                    console.log('Data:', JSON.stringify(idea.data, null, 2));
-                });
-                console.log('\nSend these to Claude to add them all to your Notion database!');
-            } else {
-                console.log('No unprocessed content ideas found.');
-            }
-        }
-
-        // Make function available globally for debugging
-        window.getStoredIdeas = getStoredIdeas;
-
         // Add some interactive enhancements
         const inputs = document.querySelectorAll('.form-control');
         inputs.forEach(input => {
@@ -962,5 +560,5 @@
             });
         });
     </script>
-
-</body></html>
+</body>
+</html>
