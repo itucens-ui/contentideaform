@@ -1,0 +1,966 @@
+<html lang="en"><head>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+      (function() {
+        const originalConsole = window.console;
+        window.console = {
+          log: (...args) => {
+            originalConsole.log(...args);
+            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
+          },
+          error: (...args) => {
+            originalConsole.error(...args);
+            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
+          },
+          warn: (...args) => {
+            originalConsole.warn(...args);
+            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
+          }
+        };
+
+        let requestId = 0;
+        let callbacksMap = new Map();
+        let streamControllers = new Map();
+        
+        window.claude = {
+          complete: (prompt) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
+            });
+          }
+        };
+
+        let pendingBlobs = new Map();
+        URL.createObjectURL = (blob) => {
+          // Store the blob and create an ID and URL for it
+          const blobId = `blob-${Date.now()}-${Math.random()}`;
+          pendingBlobs.set(blobId, blob);
+          return `blob-request://${blobId}`;
+        };
+
+        URL.revokeObjectURL = (url) => {
+          // Remove the blob from our store
+          const blobId = url.replace("blob-request://", "");
+          pendingBlobs.delete(blobId);
+        };
+
+        const getBlobFromURL = (url) => {
+          const blobId = url.replace("blob-request://", "");
+          return pendingBlobs.get(blobId);
+        };
+
+        // Override global fetch with streaming support
+        window.fetch = (url, init = {}) => {
+          return new Promise((resolve, reject) => {
+            const id = requestId++;
+            const channelId = `fetch-${id}-${Date.now()}`;
+            
+            callbacksMap.set(id, { 
+              resolve: (response) => {
+                // Create a ReadableStream for the response body
+                const stream = new ReadableStream({
+                  start(controller) {
+                    streamControllers.set(channelId, controller);
+                  },
+                  cancel() {
+                    streamControllers.delete(channelId);
+                  }
+                });
+                
+                // Create and return the Response with the stream
+                resolve(new Response(stream, {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers
+                }));
+              },
+              reject,
+              channelId
+            });
+            
+            window.parent.postMessage({
+              type: 'proxyFetch',
+              id,
+              url,
+              init,
+              channelId
+            }, '*');
+          });
+        };
+
+        window.addEventListener('message', async (event) => {
+          if (event.data.type === 'takeScreenshot') {
+            const rootElement = document.getElementById('artifacts-component-root-html');
+            if (!rootElement) {
+              window.parent.postMessage({
+                type: 'screenshotError',
+                error: new Error('Root element not found'),
+              }, '*');
+            }
+            const screenshot = await htmlToImage.toPng(rootElement, {
+              imagePlaceholder:
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
+            });
+            window.parent.postMessage({
+              type: 'screenshotData',
+              data: screenshot,
+            }, '*');
+          } else if (event.data.type === 'claudeComplete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.completion);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'proxyFetchResponse') {
+            const callback = callbacksMap.get(event.data.id);
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+              callbacksMap.delete(event.data.id);
+            } else {
+              // Initial response with headers, status, etc.
+              callback.resolve({
+                status: event.data.status,
+                statusText: event.data.statusText,
+                headers: event.data.headers
+              });
+              // Don't delete the callback yet if streaming
+              if (!event.data.body) {
+                callbacksMap.delete(event.data.id);
+              }
+            }
+          } else if (event.data.type === 'proxyFetchStream') {
+            // Handle streaming data chunks
+            const controller = streamControllers.get(event.data.channelId);
+            if (controller) {
+              if (event.data.error) {
+                controller.error(new Error(event.data.error));
+                streamControllers.delete(event.data.channelId);
+              } else if (event.data.done) {
+                controller.close();
+                streamControllers.delete(event.data.channelId);
+                // Clean up the callback
+                const callback = Array.from(callbacksMap.entries()).find(
+                  ([_, value]) => value.channelId === event.data.channelId
+                );
+                if (callback) {
+                  callbacksMap.delete(callback[0]);
+                }
+              } else if (event.data.chunk) {
+                controller.enqueue(new Uint8Array(event.data.chunk));
+              }
+            }
+          }
+        });
+
+        window.addEventListener('click', (event) => {
+          const isEl = event.target instanceof HTMLElement;
+          if (!isEl) return;
+    
+          // find ancestor links
+          const linkEl = event.target.closest("a");
+          if (!linkEl || !linkEl.href) return;
+    
+          event.preventDefault();
+          event.stopImmediatePropagation();
+    
+          if (linkEl.href.startsWith("blob-request:")) {
+            const blob = getBlobFromURL(linkEl.href);
+            if (!blob) return;
+            void blob.arrayBuffer().then((data) => {
+              window.parent.postMessage({
+                type: "downloadFile",
+                filename: linkEl.download,
+                data,
+                mimeType: blob.type || "application/octet-stream",
+              });
+            });
+          } else if (linkEl.href.startsWith("data:")) {
+            const [header, base64Data] = linkEl.href.split(",");
+            const mimeMatch = header.match(/data:([^;]+)/);
+            const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+            const binaryString = atob(base64Data);
+            const data = Uint8Array.from(binaryString, (c) =>
+              c.charCodeAt(0),
+            ).buffer;
+            window.parent.postMessage({
+              type: "downloadFile",
+              filename: linkEl.download,
+              data,
+              mimeType,
+            });
+          } else {
+            let linkUrl;
+            try {
+              linkUrl = new URL(linkEl.href);
+            } catch (error) {
+              return;
+            }
+    
+            if (linkUrl.hostname === window.location.hostname) return;
+      
+            window.parent.postMessage({
+              type: 'openExternal',
+              href: linkEl.href,
+            }, '*');
+          }
+      });
+
+        const originalOpen = window.open;
+        window.open = function (url) {
+          window.parent.postMessage({
+            type: "openExternal",
+            href: url,
+          }, "*");
+        };
+
+        window.addEventListener('error', (event) => {
+          window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*');
+        });
+      })();
+    </script>
+  
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Content Idea Capture</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #FF7EC0 0%, #FF9A9E 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
+            padding: 40px;
+            max-width: 700px;
+            width: 100%;
+            position: relative;
+            overflow: hidden;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #FF7EC0, #FF9A9E, #FFB6C1, #FFC0CB);
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 35px;
+        }
+
+        .header h1 {
+            color: #2d3748;
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 15px;
+            line-height: 1.2;
+        }
+
+        .header p {
+            color: #718096;
+            font-size: 18px;
+            line-height: 1.4;
+        }
+
+        .export-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .export-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
+
+        .export-btn {
+            padding: 8px 16px;
+            background: #FF7EC0;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .export-btn:hover {
+            background: #FF6BB3;
+            transform: translateY(-1px);
+        }
+
+        .export-btn:active {
+            transform: translateY(0);
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #2d3748;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .required {
+            color: #e53e3e;
+        }
+
+        .form-control {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            background: #fafafa;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: #FF7EC0;
+            background: white;
+            box-shadow: 0 0 0 3px rgba(255, 126, 192, 0.1);
+        }
+
+        select.form-control {
+            cursor: pointer;
+        }
+
+        textarea.form-control {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .submit-btn {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #FF7EC0 0%, #FF9A9E 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .submit-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(255, 126, 192, 0.4);
+        }
+
+        .submit-btn:active {
+            transform: translateY(0);
+        }
+
+        .submit-btn:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .loading {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .success-message {
+            display: none;
+            background: #38a169;
+            color: white;
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        .error-message {
+            display: none;
+            background: #e53e3e;
+            color: white;
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        .form-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .form-section h3 {
+            color: #2d3748;
+            font-size: 16px;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .icon {
+            width: 20px;
+            height: 20px;
+        }
+
+        .helper-text {
+            font-size: 12px;
+            color: #718096;
+            margin-top: 4px;
+        }
+
+        .notion-link {
+            display: inline-block;
+            margin-top: 10px;
+            color: #FF7EC0;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .notion-link:hover {
+            text-decoration: underline;
+        }
+
+        .confirmation-page {
+            display: none;
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .confirmation-page.show {
+            display: block;
+        }
+
+        .form-container.hide {
+            display: none;
+        }
+
+        .confirmation-icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+            animation: bounce 1s ease-in-out;
+        }
+
+        @keyframes bounce {
+            0%, 20%, 60%, 100% {
+                transform: translateY(0);
+            }
+            40% {
+                transform: translateY(-10px);
+            }
+            80% {
+                transform: translateY(-5px);
+            }
+        }
+
+        .confirmation-title {
+            font-size: 28px;
+            font-weight: 700;
+            color: #2d3748;
+            margin-bottom: 15px;
+        }
+
+        .confirmation-text {
+            font-size: 18px;
+            color: #718096;
+            margin-bottom: 30px;
+            line-height: 1.5;
+        }
+
+        .back-btn {
+            background: linear-gradient(135deg, #FF7EC0 0%, #FF9A9E 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-right: 15px;
+        }
+
+        .back-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(255, 126, 192, 0.4);
+        }
+
+        .notion-btn {
+            background: #f8f9fa;
+            color: #2d3748;
+            border: 2px solid #e2e8f0;
+            padding: 12px 24px;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .notion-btn:hover {
+            background: #e2e8f0;
+            transform: translateY(-2px);
+        }
+
+        @media (max-width: 640px) {
+            .form-row {
+                grid-template-columns: 1fr;
+                gap: 0;
+            }
+            
+            .export-buttons {
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .container {
+                margin: 20px;
+                padding: 30px 20px;
+                max-height: 85vh;
+            }
+        }
+    </style>
+</head>
+<body id="artifacts-component-root-html">
+    <div class="container">
+        <div class="form-container" id="formContainer">
+            <div class="header">
+                <h1>💡 Content Idea Capture</h1>
+                <p>Add new content ideas directly to your Notion Content Notebook</p>
+            </div>
+
+            <div class="export-section">
+                <h3>🚀 Export &amp; Setup Options</h3>
+                <p>Save this form and set up the Notion connection</p>
+                <div class="export-buttons">
+                    <button class="export-btn" onclick="downloadHTML()">
+                        💾 Download Form
+                    </button>
+                    <button class="export-btn" onclick="copyHTMLCode()">
+                        📋 Copy HTML Code
+                    </button>
+                    <button class="export-btn" onclick="openInNewTab()">
+                        🔗 Open in New Tab
+                    </button>
+                    <button class="export-btn" onclick="showSetupInstructions()">
+                        ⚙️ Setup Guide
+                    </button>
+                </div>
+                <div id="setupInstructions" style="display: none; margin-top: 15px; padding: 15px; background: #e8f4fd; border-radius: 8px; text-align: left;">
+                    <h4>🔧 To Connect Form to Notion:</h4>
+                    <ol style="margin: 10px 0; padding-left: 20px;">
+                        <li><strong>Option A:</strong> Set up a webhook service (Zapier, Make.com, or custom)</li>
+                        <li><strong>Option B:</strong> Use the console method - submit form, copy data, send to Claude</li>
+                        <li><strong>Option C:</strong> Host this form on a server with Notion API access</li>
+                    </ol>
+                    <p><strong>For now:</strong> Form captures data locally. Check browser console after submitting!</p>
+                </div>
+            </div>
+
+            <div class="success-message" id="successMessage">
+                ✨ Content idea added successfully to your Notion workspace!
+                <a href="https://notion.so/1cb71346f26d81d69f66d3e940afcf71" target="_blank" class="notion-link">
+                    View in Notion →
+                </a>
+            </div>
+
+            <div class="error-message" id="errorMessage">
+                ❌ Error adding content idea. Please try again.
+            </div>
+
+            <form id="contentForm">
+                <div class="form-section">
+                    <h3>
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"></path>
+                        </svg>
+                        Content Details
+                    </h3>
+                    
+                    <div class="form-group">
+                        <label for="contentTitle">Content Name <span class="required">*</span></label>
+                        <input type="text" id="contentTitle" class="form-control" placeholder="What's your content idea called?" required="">
+                        <div class="helper-text">Name or headline of your content piece</div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="channel">Channel <span class="required">*</span></label>
+                            <select id="channel" class="form-control" required="">
+                                <option value="">Select channel...</option>
+                                <option value="Instagram">Instagram</option>
+                                <option value="YouTube">YouTube</option>
+                                <option value="TikTok">TikTok</option>
+                                <option value="Pinterest">Pinterest</option>
+                                <option value="Facebook">Facebook</option>
+                                <option value="Newsletter">Newsletter</option>
+                                <option value="Blog">Blog</option>
+                                <option value="Podcast">Podcast</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="contentType">Format <span class="required">*</span></label>
+                            <select id="contentType" class="form-control" required="">
+                                <option value="">Select format...</option>
+                                <option value="Single post">Single Post</option>
+                                <option value="Carousel">Carousel</option>
+                                <option value="Short-form video">Short-form Video</option>
+                                <option value="Long-form video">Long-form Video</option>
+                                <option value="Newsletter">Newsletter</option>
+                                <option value="Blog post">Blog Post</option>
+                                <option value="Podcast episode">Podcast Episode</option>
+                                <option value="Static pin">Static Pin</option>
+                                <option value="Video pin">Video Pin</option>
+                                <option value="Idea pin">Idea Pin</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="notes">Notes</label>
+                        <textarea id="notes" class="form-control" placeholder="Add any notes about your content idea - inspiration links, your unique angle, talking points, etc."></textarea>
+                        <div class="helper-text">Capture your thoughts, inspiration links, and how you'll make this content uniquely yours</div>
+                    </div>
+                </div>
+
+                <button type="submit" class="submit-btn" id="submitBtn">
+                    <span id="submitText">Add to Content Notebook</span>
+                    <div class="loading" id="loading">
+                        <div class="spinner"></div>
+                    </div>
+                </button>
+            </form>
+        </div>
+
+        <!-- Confirmation Page -->
+        <div class="confirmation-page" id="confirmationPage">
+            <div class="confirmation-icon">🎉</div>
+            <h1 class="confirmation-title">Content Idea Captured!</h1>
+            <p class="confirmation-text">
+                Your content idea has been successfully added to your Notion Content Notebook.<br>
+                You can now start developing this idea further in your content workflow.
+            </p>
+            <div>
+                <button class="back-btn" onclick="showForm()">
+                    📝 Add Another Idea
+                </button>
+                <a href="https://www.notion.so/Content-notebook-1cb71346f26d81be8f54e00754ee5fd7?source=copy_link" target="_blank" class="notion-btn">
+                    👀 View in Notion
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('contentForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const submitText = document.getElementById('submitText');
+        const loading = document.getElementById('loading');
+        const successMessage = document.getElementById('successMessage');
+        const errorMessage = document.getElementById('errorMessage');
+        const formContainer = document.getElementById('formContainer');
+        const confirmationPage = document.getElementById('confirmationPage');
+
+        function showForm() {
+            formContainer.classList.remove('hide');
+            confirmationPage.classList.remove('show');
+            successMessage.style.display = 'none';
+            errorMessage.style.display = 'none';
+        }
+
+        function showConfirmation() {
+            formContainer.classList.add('hide');
+            confirmationPage.classList.add('show');
+        }
+
+        // Export functionality
+        function downloadHTML() {
+            const htmlContent = document.documentElement.outerHTML;
+            const blob = new Blob([htmlContent], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'content-idea-capture-form.html';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function copyHTMLCode() {
+            const htmlContent = document.documentElement.outerHTML;
+            navigator.clipboard.writeText(htmlContent).then(() => {
+                alert('✅ HTML code copied to clipboard! You can now paste it into any text editor and save as .html file.');
+            }).catch(() => {
+                // Fallback for browsers that don't support clipboard API
+                const textArea = document.createElement('textarea');
+                textArea.value = htmlContent;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                alert('✅ HTML code copied to clipboard!');
+            });
+        }
+
+        function openInNewTab() {
+            // Use window.open with about:blank and then write content
+            const newWindow = window.open('about:blank', '_blank');
+            if (newWindow) {
+                const htmlContent = document.documentElement.outerHTML;
+                newWindow.document.open();
+                newWindow.document.write(htmlContent);
+                newWindow.document.close();
+            } else {
+                alert('Pop-up blocked! Please allow pop-ups for this site and try again.');
+            }
+        }
+
+        function showSetupInstructions() {
+            const instructions = document.getElementById('setupInstructions');
+            instructions.style.display = instructions.style.display === 'none' ? 'block' : 'none';
+        }
+
+        // Update content type options based on channel selection
+        const channelSelect = document.getElementById('channel');
+        const contentTypeSelect = document.getElementById('contentType');
+
+        const contentTypeMapping = {
+            'Instagram': ['Single post', 'Carousel', 'Short-form video'],
+            'YouTube': ['Long-form video', 'Short-form video'],
+            'TikTok': ['Short-form video'],
+            'Pinterest': ['Static pin', 'Video pin', 'Idea pin'],
+            'Facebook': ['Single post', 'Long-form video'],
+            'Newsletter': ['Newsletter'],
+            'Blog': ['Blog post'],
+            'Podcast': ['Podcast episode']
+        };
+
+        channelSelect.addEventListener('change', function() {
+            const selectedChannel = this.value;
+            const contentTypes = contentTypeMapping[selectedChannel] || [];
+            
+            // Clear current options except the first one
+            contentTypeSelect.innerHTML = '<option value="">Select format...</option>';
+            
+            // Add all available content types (not just channel-specific ones)
+            const allTypes = ['Single post', 'Carousel', 'Short-form video', 'Long-form video', 'Newsletter', 'Blog post', 'Podcast episode', 'Static pin', 'Video pin', 'Idea pin'];
+            
+            allTypes.forEach(type => {
+                const option = document.createElement('option');
+                option.value = type;
+                option.textContent = type;
+                // Highlight recommended types for the channel
+                if (contentTypes.includes(type)) {
+                    option.textContent += ' ⭐';
+                }
+                contentTypeSelect.appendChild(option);
+            });
+        });
+
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            // Show loading state
+            submitBtn.disabled = true;
+            submitText.style.opacity = '0';
+            loading.style.display = 'block';
+            
+            // Hide any previous messages
+            successMessage.style.display = 'none';
+            errorMessage.style.display = 'none';
+
+            // Get form data
+            const formData = {
+                title: document.getElementById('contentTitle').value,
+                channel: document.getElementById('channel').value,
+                contentType: document.getElementById('contentType').value,
+                notes: document.getElementById('notes').value || null
+            };
+
+            try {
+                const success = await addToNotion(formData);
+                
+                if (success) {
+                    form.reset();
+                    showConfirmation();
+                } else {
+                    throw new Error('Failed to add to Notion');
+                }
+                
+            } catch (error) {
+                console.error('Error:', error);
+                errorMessage.style.display = 'block';
+                errorMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } finally {
+                // Reset button state
+                submitBtn.disabled = false;
+                submitText.style.opacity = '1';
+                loading.style.display = 'none';
+            }
+        });
+
+        // Function to add content idea directly to your Notion Content database
+        async function addToNotion(data) {
+            try {
+                // Replace this URL with your deployed Vercel URL
+                const API_ENDPOINT = 'https://your-app-name.vercel.app/api/submit-content';
+                
+                const response = await fetch(API_ENDPOINT, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        name: data.title,
+                        channel: data.channel,
+                        format: data.contentType,
+                        notes: data.notes
+                    })
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    console.log('✅ Successfully added to Notion:', result);
+                    
+                    // Store the success info
+                    localStorage.setItem('lastContentIdea', JSON.stringify({
+                        ...data,
+                        notionUrl: result.url,
+                        timestamp: new Date().toISOString()
+                    }));
+                    
+                    return true;
+                } else {
+                    const errorData = await response.json();
+                    console.error('❌ Notion API Error:', errorData);
+                    
+                    // Fallback: store locally for manual processing
+                    console.log('📋 FALLBACK - Copy this data to send to Claude:');
+                    console.log(`Name: ${data.title}`);
+                    console.log(`Channel: ${data.channel}`);
+                    console.log(`Format: ${data.contentType}`);
+                    if (data.notes) console.log(`Notes: ${data.notes}`);
+                    
+                    return false;
+                }
+                
+            } catch (error) {
+                console.error('❌ Connection Error:', error);
+                
+                // Fallback: show data for manual processing
+                console.log('📋 CONNECTION ISSUE - Copy this data to send to Claude:');
+                console.log(`Name: ${data.title}`);
+                console.log(`Channel: ${data.channel}`);
+                console.log(`Format: ${data.contentType}`);
+                if (data.notes) console.log(`Notes: ${data.notes}`);
+                
+                alert('Connection issue. Check console for data to send to Claude!');
+                return false;
+            }
+        }
+
+        // Function to get all stored ideas for batch processing
+        function getStoredIdeas() {
+            const ideas = JSON.parse(localStorage.getItem('contentIdeas') || '[]');
+            const unprocessed = ideas.filter(idea => !idea.processed);
+            
+            if (unprocessed.length > 0) {
+                console.log(`📋 You have ${unprocessed.length} content ideas ready for Notion:`);
+                unprocessed.forEach((idea, index) => {
+                    console.log(`\n--- Idea ${index + 1} ---`);
+                    console.log('Data:', JSON.stringify(idea.data, null, 2));
+                });
+                console.log('\nSend these to Claude to add them all to your Notion database!');
+            } else {
+                console.log('No unprocessed content ideas found.');
+            }
+        }
+
+        // Make function available globally for debugging
+        window.getStoredIdeas = getStoredIdeas;
+
+        // Add some interactive enhancements
+        const inputs = document.querySelectorAll('.form-control');
+        inputs.forEach(input => {
+            input.addEventListener('focus', function() {
+                this.parentElement.style.transform = 'translateY(-1px)';
+                this.parentElement.style.transition = 'transform 0.2s ease';
+            });
+            
+            input.addEventListener('blur', function() {
+                this.parentElement.style.transform = 'translateY(0)';
+            });
+        });
+    </script>
+
+</body></html>
