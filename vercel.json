@@ -1,17 +1,17 @@
 {
-  "name": "content-idea-form",
-  "version": "1.0.0",
-  "description": "Backend for Content Idea Form with Notion integration",
-  "main": "api/submit-content.js",
-  "type": "module",
-  "scripts": {
-    "dev": "vercel dev",
-    "deploy": "vercel --prod"
+  "functions": {
+    "api/submit-content.js": {
+      "runtime": "@vercel/node@3.0.7"
+    }
   },
-  "dependencies": {
-    "node-fetch": "^3.3.0"
-  },
-  "engines": {
-    "node": "18.x"
-  }
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/public/index.html"
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/$1"
+    }
+  ]
 }
