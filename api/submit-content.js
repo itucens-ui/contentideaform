@@ -54,7 +54,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Prepare data for Notion - using exact field names
+    // Prepare data for Notion - using exact field names from your database
     const notionData = {
       parent: {
         database_id: DATABASE_ID
@@ -68,6 +68,11 @@ export default async function handler(req, res) {
               }
             }
           ]
+        },
+        "Channel": {
+          select: {
+            name: channel
+          }
         },
         "Format": {
           select: {
