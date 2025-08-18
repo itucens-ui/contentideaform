@@ -1,4 +1,4 @@
-// api/submit-content.js - Fixed version for Vercel
+// api/submit-content.js - Final version with enhanced debugging
 export default async function handler(req, res) {
   // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -14,10 +14,14 @@ export default async function handler(req, res) {
   }
 
   try {
+    console.log('=== FORM SUBMISSION DEBUG ===');
+    console.log('Request body:', req.body);
+    
     const { name, channel, format, notes } = req.body;
 
     // Validate required fields
     if (!name || !channel || !format) {
+      console.log('Missing required fields:', { name, channel, format });
       return res.status(400).json({ 
         error: 'Missing required fields: name, channel, format' 
       });
@@ -26,17 +30,31 @@ export default async function handler(req, res) {
     // Your Notion database ID
     const DATABASE_ID = '1cb71346f26d81d69f66d3e940afcf71';
     
+    // Debug environment variables
+    console.log('Environment variables available:', Object.keys(process.env));
+    console.log('VERCEL_ENV:', process.env.VERCEL_ENV);
+    
     // Get Notion token from environment variables
     const NOTION_TOKEN = process.env.NOTION_TOKEN;
     
+    console.log('NOTION_TOKEN exists:', !!NOTION_TOKEN);
+    console.log('NOTION_TOKEN length:', NOTION_TOKEN ? NOTION_TOKEN.length : 0);
+    console.log('NOTION_TOKEN starts with secret_:', NOTION_TOKEN ? NOTION_TOKEN.startsWith('secret_') : false);
+    
     if (!NOTION_TOKEN) {
       console.error('NOTION_TOKEN not found in environment variables');
+      console.error('Available env vars:', Object.keys(process.env));
       return res.status(500).json({ 
-        error: 'Server configuration error - missing Notion token' 
+        error: 'Server configuration error - missing Notion token',
+        debug: {
+          message: 'NOTION_TOKEN environment variable not found',
+          environment: process.env.VERCEL_ENV || 'unknown',
+          availableVars: Object.keys(process.env).filter(key => !key.includes('SECRET'))
+        }
       });
     }
 
-    // Prepare data for Notion
+    // Prepare data for Notion - using exact field names
     const notionData = {
       parent: {
         database_id: DATABASE_ID
@@ -77,7 +95,9 @@ export default async function handler(req, res) {
       };
     }
 
-    console.log('Sending to Notion:', JSON.stringify(notionData, null, 2));
+    console.log('Sending to Notion API:');
+    console.log('Database ID:', DATABASE_ID);
+    console.log('Data:', JSON.stringify(notionData, null, 2));
 
     // Send to Notion API
     const response = await fetch('https://api.notion.com/v1/pages', {
@@ -91,18 +111,35 @@ export default async function handler(req, res) {
     });
 
     const responseText = await response.text();
-    console.log('Notion API response:', response.status, responseText);
+    console.log('Notion API Response Status:', response.status);
+    console.log('Notion API Response:', responseText);
 
     if (!response.ok) {
-      console.error('Notion API Error:', response.status, responseText);
-      return res.status(500).json({ 
+      console.error('Notion API Error Details:');
+      console.error('Status:', response.status);
+      console.error('Response:', responseText);
+      
+      let errorDetails;
+      try {
+        errorDetails = JSON.parse(responseText);
+      } catch (e) {
+        errorDetails = { message: responseText };
+      }
+      
+      return res.status(response.status).json({ 
         error: 'Failed to create Notion page',
-        details: responseText,
-        status: response.status
+        details: errorDetails,
+        status: response.status,
+        debug: {
+          databaseId: DATABASE_ID,
+          tokenLength: NOTION_TOKEN.length,
+          sentData: notionData
+        }
       });
     }
 
     const result = JSON.parse(responseText);
+    console.log('Success! Created page:', result.id);
     
     return res.status(200).json({ 
       success: true, 
@@ -115,7 +152,8 @@ export default async function handler(req, res) {
     console.error('Server Error:', error);
     return res.status(500).json({ 
       error: 'Internal server error',
-      details: error.message 
+      details: error.message,
+      stack: error.stack
     });
   }
 }
