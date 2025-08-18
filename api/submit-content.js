@@ -1,4 +1,4 @@
-// api/submit-content.js - Final version with enhanced debugging
+// api/submit-content.js - Clean working version
 export default async function handler(req, res) {
   // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -17,7 +17,7 @@ export default async function handler(req, res) {
     console.log('=== FORM SUBMISSION DEBUG ===');
     console.log('Request body:', req.body);
     
-    const { name, channel, format, notes } = req.body;
+    const { name, channel, format, notes, goal } = req.body;
 
     // Validate required fields
     if (!name || !channel || !format) {
@@ -30,31 +30,19 @@ export default async function handler(req, res) {
     // Your Notion database ID
     const DATABASE_ID = '1cb71346f26d81d69f66d3e940afcf71';
     
-    // Debug environment variables
-    console.log('Environment variables available:', Object.keys(process.env));
-    console.log('VERCEL_ENV:', process.env.VERCEL_ENV);
-    
     // Get Notion token from environment variables
     const NOTION_TOKEN = process.env.NOTION_TOKEN;
     
     console.log('NOTION_TOKEN exists:', !!NOTION_TOKEN);
-    console.log('NOTION_TOKEN length:', NOTION_TOKEN ? NOTION_TOKEN.length : 0);
-    console.log('NOTION_TOKEN starts with secret_:', NOTION_TOKEN ? NOTION_TOKEN.startsWith('secret_') : false);
     
     if (!NOTION_TOKEN) {
       console.error('NOTION_TOKEN not found in environment variables');
-      console.error('Available env vars:', Object.keys(process.env));
       return res.status(500).json({ 
-        error: 'Server configuration error - missing Notion token',
-        debug: {
-          message: 'NOTION_TOKEN environment variable not found',
-          environment: process.env.VERCEL_ENV || 'unknown',
-          availableVars: Object.keys(process.env).filter(key => !key.includes('SECRET'))
-        }
+        error: 'Server configuration error - missing Notion token'
       });
     }
 
-    // Prepare data for Notion - using exact field names from your database
+    // Prepare data for Notion with all required fields
     const notionData = {
       parent: {
         database_id: DATABASE_ID
@@ -87,6 +75,15 @@ export default async function handler(req, res) {
       }
     };
 
+    // Add goal if provided
+    if (goal && goal.trim()) {
+      notionData.properties["Goal"] = {
+        select: {
+          name: goal.trim()
+        }
+      };
+    }
+
     // Add notes if provided
     if (notes && notes.trim()) {
       notionData.properties["Notes"] = {
@@ -100,9 +97,7 @@ export default async function handler(req, res) {
       };
     }
 
-    console.log('Sending to Notion API:');
-    console.log('Database ID:', DATABASE_ID);
-    console.log('Data:', JSON.stringify(notionData, null, 2));
+    console.log('Sending to Notion:', JSON.stringify(notionData, null, 2));
 
     // Send to Notion API
     const response = await fetch('https://api.notion.com/v1/pages', {
@@ -120,9 +115,7 @@ export default async function handler(req, res) {
     console.log('Notion API Response:', responseText);
 
     if (!response.ok) {
-      console.error('Notion API Error Details:');
-      console.error('Status:', response.status);
-      console.error('Response:', responseText);
+      console.error('Notion API Error:', response.status, responseText);
       
       let errorDetails;
       try {
@@ -134,12 +127,7 @@ export default async function handler(req, res) {
       return res.status(response.status).json({ 
         error: 'Failed to create Notion page',
         details: errorDetails,
-        status: response.status,
-        debug: {
-          databaseId: DATABASE_ID,
-          tokenLength: NOTION_TOKEN.length,
-          sentData: notionData
-        }
+        status: response.status
       });
     }
 
@@ -157,8 +145,7 @@ export default async function handler(req, res) {
     console.error('Server Error:', error);
     return res.status(500).json({ 
       error: 'Internal server error',
-      details: error.message,
-      stack: error.stack
+      details: error.message
     });
   }
 }
