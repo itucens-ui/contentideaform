@@ -325,12 +325,10 @@
                         <select id="channel" class="form-control" required>
                             <option value="">Select channel...</option>
                             <option value="Instagram">Instagram</option>
-                            <option value="YouTube">YouTube</option>
-                            <option value="TikTok">TikTok</option>
-                            <option value="Pinterest">Pinterest</option>
-                            <option value="Facebook">Facebook</option>
-                            <option value="Newsletter">Newsletter</option>
-                            <option value="Blog">Blog</option>
+                            <option value="Youtube">Youtube</option>
+                            <option value="Email">Email</option>
+                            <option value="The Vocal Party">The Vocal Party</option>
+                            <option value="Tiktok">Tiktok</option>
                             <option value="Podcast">Podcast</option>
                         </select>
                     </div>
@@ -414,12 +412,10 @@
 
         const contentTypeMapping = {
             'Instagram': ['Single post', 'Carousel', 'Short-form video'],
-            'YouTube': ['Long-form video', 'Short-form video'],
-            'TikTok': ['Short-form video'],
-            'Pinterest': ['Static pin', 'Video pin', 'Idea pin'],
-            'Facebook': ['Single post', 'Long-form video'],
-            'Newsletter': ['Newsletter'],
-            'Blog': ['Blog post'],
+            'Youtube': ['Long-form video', 'Short-form video'],
+            'Tiktok': ['Short-form video'],
+            'Email': ['Newsletter'],
+            'The Vocal Party': ['Newsletter', 'Blog post'],
             'Podcast': ['Podcast episode']
         };
 
@@ -430,7 +426,7 @@
             // Clear current options except the first one
             contentTypeSelect.innerHTML = '<option value="">Select format...</option>';
             
-            // Add all available content types (not just channel-specific ones)
+            // Add all available content types from your database
             const allTypes = ['Single post', 'Carousel', 'Short-form video', 'Long-form video', 'Newsletter', 'Blog post', 'Podcast episode', 'Static pin', 'Video pin', 'Idea pin'];
             
             allTypes.forEach(type => {
