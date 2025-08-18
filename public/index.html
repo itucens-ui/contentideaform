@@ -1,560 +1,175 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Content Idea Capture</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+// api/submit-content.js - Final version with enhanced debugging
+export default async function handler(req, res) {
+  // Enable CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
-            background: linear-gradient(135deg, #FF7EC0 0%, #FF9A9E 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
 
-        .container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
-            padding: 40px;
-            max-width: 600px;
-            width: 100%;
-            position: relative;
-            overflow: hidden;
-            max-height: 90vh;
-            overflow-y: auto;
-        }
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
 
-        .container::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 4px;
-            background: linear-gradient(90deg, #FF7EC0, #FF9A9E, #FFB6C1, #FFC0CB);
-        }
+  try {
+    console.log('=== FORM SUBMISSION DEBUG ===');
+    console.log('Request body:', req.body);
+    
+    const { name, channel, format, notes, goal } = req.body;
 
-        .header {
-            text-align: center;
-            margin-bottom: 30px;
-        }
+    // Validate required fields
+    if (!name || !channel || !format) {
+      console.log('Missing required fields:', { name, channel, format });
+      return res.status(400).json({ 
+        error: 'Missing required fields: name, channel, format' 
+      });
+    }
 
-        .header h1 {
-            color: #2d3748;
-            font-size: 32px;
-            font-weight: 700;
-            margin-bottom: 15px;
-            line-height: 1.2;
+    // Your Notion database ID
+    const DATABASE_ID = '1cb71346f26d81d69f66d3e940afcf71';
+    
+    // Debug environment variables
+    console.log('Environment variables available:', Object.keys(process.env));
+    console.log('VERCEL_ENV:', process.env.VERCEL_ENV);
+    
+    // Get Notion token from environment variables
+    const NOTION_TOKEN = process.env.NOTION_TOKEN;
+    
+    console.log('NOTION_TOKEN exists:', !!NOTION_TOKEN);
+    console.log('NOTION_TOKEN length:', NOTION_TOKEN ? NOTION_TOKEN.length : 0);
+    console.log('NOTION_TOKEN starts with secret_:', NOTION_TOKEN ? NOTION_TOKEN.startsWith('secret_') : false);
+    
+    if (!NOTION_TOKEN) {
+      console.error('NOTION_TOKEN not found in environment variables');
+      console.error('Available env vars:', Object.keys(process.env));
+      return res.status(500).json({ 
+        error: 'Server configuration error - missing Notion token',
+        debug: {
+          message: 'NOTION_TOKEN environment variable not found',
+          environment: process.env.VERCEL_ENV || 'unknown',
+          availableVars: Object.keys(process.env).filter(key => !key.includes('SECRET'))
         }
+      });
+    }
 
-        .header p {
-            color: #718096;
-            font-size: 18px;
-            line-height: 1.4;
-        }
-
-        .form-group {
-            margin-bottom: 25px;
-        }
-
-        .form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-        }
-
-        .form-group label {
-            display: block;
-            margin-bottom: 8px;
-            color: #2d3748;
-            font-weight: 600;
-            font-size: 14px;
-        }
-
-        .required {
-            color: #e53e3e;
-        }
-
-        .form-control {
-            width: 100%;
-            padding: 12px 16px;
-            border: 2px solid #e2e8f0;
-            border-radius: 12px;
-            font-size: 14px;
-            transition: all 0.3s ease;
-            background: #fafafa;
-        }
-
-        .form-control:focus {
-            outline: none;
-            border-color: #FF7EC0;
-            background: white;
-            box-shadow: 0 0 0 3px rgba(255, 126, 192, 0.1);
-        }
-
-        select.form-control {
-            cursor: pointer;
-        }
-
-        textarea.form-control {
-            resize: vertical;
-            min-height: 100px;
-        }
-
-        .submit-btn {
-            width: 100%;
-            padding: 16px;
-            background: linear-gradient(135deg, #FF7EC0 0%, #FF9A9E 100%);
-            color: white;
-            border: none;
-            border-radius: 12px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .submit-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 30px rgba(255, 126, 192, 0.4);
-        }
-
-        .submit-btn:active {
-            transform: translateY(0);
-        }
-
-        .submit-btn:disabled {
-            opacity: 0.7;
-            cursor: not-allowed;
-            transform: none;
-        }
-
-        .loading {
-            display: none;
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-        }
-
-        .spinner {
-            width: 20px;
-            height: 20px;
-            border: 2px solid rgba(255, 255, 255, 0.3);
-            border-radius: 50%;
-            border-top-color: white;
-            animation: spin 1s ease-in-out infinite;
-        }
-
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
-        .success-message {
-            display: none;
-            background: #38a169;
-            color: white;
-            padding: 16px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            text-align: center;
-            font-weight: 600;
-        }
-
-        .error-message {
-            display: none;
-            background: #e53e3e;
-            color: white;
-            padding: 16px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            text-align: center;
-            font-weight: 600;
-        }
-
-        .notion-link {
-            display: inline-block;
-            margin-top: 10px;
-            color: #FF7EC0;
-            text-decoration: none;
-            font-size: 14px;
-            font-weight: 500;
-        }
-
-        .notion-link:hover {
-            text-decoration: underline;
-        }
-
-        .confirmation-page {
-            display: none;
-            text-align: center;
-            padding: 40px 20px;
-        }
-
-        .confirmation-page.show {
-            display: block;
-        }
-
-        .form-container.hide {
-            display: none;
-        }
-
-        .confirmation-icon {
-            font-size: 64px;
-            margin-bottom: 20px;
-            animation: bounce 1s ease-in-out;
-        }
-
-        @keyframes bounce {
-            0%, 20%, 60%, 100% {
-                transform: translateY(0);
+    // Prepare data for Notion - using ALL fields from your database
+    const notionData = {
+      parent: {
+        database_id: DATABASE_ID
+      },
+      properties: {
+        "Name": {
+          title: [
+            {
+              text: {
+                content: name
+              }
             }
-            40% {
-                transform: translateY(-10px);
+          ]
+        },
+        "Channel": {
+          select: {
+            name: channel
+          }
+        },
+        "Format": {
+          select: {
+            name: format
+          }
+        },
+        "Status": {
+          status: {
+            name: "Idea"
+          }
+        }
+        // Note: Goal and Schedule date are optional and will be left empty
+        // Notes will be added separately if provided
+      }
+    };
+
+    // Add goal if provided
+    if (goal && goal.trim()) {
+      notionData.properties["Goal"] = {
+        select: {
+          name: goal.trim()
+        }
+      };
+    }
+
+    // Add notes if provided
+    if (notes && notes.trim()) {
+      notionData.properties["Notes"] = {
+        rich_text: [
+          {
+            text: {
+              content: notes.trim()
             }
-            80% {
-                transform: translateY(-5px);
-            }
+          }
+        ]
+      };
+    }
+
+    console.log('Sending to Notion API:');
+    console.log('Database ID:', DATABASE_ID);
+    console.log('Data:', JSON.stringify(notionData, null, 2));
+
+    // Send to Notion API
+    const response = await fetch('https://api.notion.com/v1/pages', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${NOTION_TOKEN}`,
+        'Content-Type': 'application/json',
+        'Notion-Version': '2022-06-28'
+      },
+      body: JSON.stringify(notionData)
+    });
+
+    const responseText = await response.text();
+    console.log('Notion API Response Status:', response.status);
+    console.log('Notion API Response:', responseText);
+
+    if (!response.ok) {
+      console.error('Notion API Error Details:');
+      console.error('Status:', response.status);
+      console.error('Response:', responseText);
+      
+      let errorDetails;
+      try {
+        errorDetails = JSON.parse(responseText);
+      } catch (e) {
+        errorDetails = { message: responseText };
+      }
+      
+      return res.status(response.status).json({ 
+        error: 'Failed to create Notion page',
+        details: errorDetails,
+        status: response.status,
+        debug: {
+          databaseId: DATABASE_ID,
+          tokenLength: NOTION_TOKEN.length,
+          sentData: notionData
         }
+      });
+    }
 
-        .confirmation-title {
-            font-size: 28px;
-            font-weight: 700;
-            color: #2d3748;
-            margin-bottom: 15px;
-        }
+    const result = JSON.parse(responseText);
+    console.log('Success! Created page:', result.id);
+    
+    return res.status(200).json({ 
+      success: true, 
+      pageId: result.id,
+      url: result.url,
+      message: 'Content idea added successfully!'
+    });
 
-        .confirmation-text {
-            font-size: 18px;
-            color: #718096;
-            margin-bottom: 30px;
-            line-height: 1.5;
-        }
-
-        .back-btn {
-            background: linear-gradient(135deg, #FF7EC0 0%, #FF9A9E 100%);
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 10px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            margin-right: 15px;
-        }
-
-        .back-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(255, 126, 192, 0.4);
-        }
-
-        .notion-btn {
-            background: #f8f9fa;
-            color: #2d3748;
-            border: 2px solid #e2e8f0;
-            padding: 12px 24px;
-            border-radius: 10px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            text-decoration: none;
-            display: inline-block;
-        }
-
-        .notion-btn:hover {
-            background: #e2e8f0;
-            transform: translateY(-2px);
-        }
-
-        @media (max-width: 640px) {
-            .form-row {
-                grid-template-columns: 1fr;
-                gap: 0;
-            }
-
-            .container {
-                margin: 20px;
-                padding: 30px 20px;
-                max-height: 85vh;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="form-container" id="formContainer">
-            <div class="header">
-                <h1>💡 Content Idea Capture</h1>
-                <p>Add new content ideas directly to your Notion Content Notebook</p>
-            </div>
-
-            <div class="success-message" id="successMessage">
-                ✨ Content idea added successfully to your Notion workspace!
-                <a href="https://www.notion.so/Content-notebook-1cb71346f26d81be8f54e00754ee5fd7?source=copy_link" target="_blank" class="notion-link">
-                    View in Notion →
-                </a>
-            </div>
-
-            <div class="error-message" id="errorMessage">
-                ❌ Error adding content idea. Please try again.
-            </div>
-
-            <form id="contentForm">
-                <div class="form-group">
-                    <label for="contentTitle">Content Name <span class="required">*</span></label>
-                    <input type="text" id="contentTitle" class="form-control" placeholder="What's your content idea called?" required>
-                </div>
-
-                <div class="form-row">
-                    <div class="form-group">
-                        <label for="channel">Channel <span class="required">*</span></label>
-                        <select id="channel" class="form-control" required>
-                            <option value="">Select channel...</option>
-                            <option value="Instagram">Instagram</option>
-                            <option value="Youtube">Youtube</option>
-                            <option value="Email">Email</option>
-                            <option value="The Vocal Party">The Vocal Party</option>
-                            <option value="Tiktok">Tiktok</option>
-                            <option value="Podcast">Podcast</option>
-                        </select>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="contentType">Format <span class="required">*</span></label>
-                        <select id="contentType" class="form-control" required>
-                            <option value="">Select format...</option>
-                            <option value="Single post">Single Post</option>
-                            <option value="Carousel">Carousel</option>
-                            <option value="Short-form video">Short-form Video</option>
-                            <option value="Long-form video">Long-form Video</option>
-                            <option value="Newsletter">Newsletter</option>
-                            <option value="Blog post">Blog Post</option>
-                            <option value="Podcast episode">Podcast Episode</option>
-                            <option value="Static pin">Static Pin</option>
-                            <option value="Video pin">Video Pin</option>
-                            <option value="Idea pin">Idea Pin</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="form-group">
-                    <label for="notes">Notes</label>
-                    <textarea id="notes" class="form-control" placeholder="Add any notes about your content idea - inspiration links, your unique angle, talking points, etc."></textarea>
-                </div>
-
-                <button type="submit" class="submit-btn" id="submitBtn">
-                    <span id="submitText">Add to Content Notebook</span>
-                    <div class="loading" id="loading">
-                        <div class="spinner"></div>
-                    </div>
-                </button>
-            </form>
-        </div>
-
-        <!-- Confirmation Page -->
-        <div class="confirmation-page" id="confirmationPage">
-            <div class="confirmation-icon">🎉</div>
-            <h1 class="confirmation-title">Content Idea Captured!</h1>
-            <p class="confirmation-text">
-                Your content idea has been successfully added to your Notion Content Notebook.<br>
-                You can now start developing this idea further in your content workflow.
-            </p>
-            <div>
-                <button class="back-btn" onclick="showForm()">
-                    📝 Add Another Idea
-                </button>
-                <a href="https://www.notion.so/Content-notebook-1cb71346f26d81be8f54e00754ee5fd7?source=copy_link" target="_blank" class="notion-btn">
-                    👀 View in Notion
-                </a>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        const form = document.getElementById('contentForm');
-        const submitBtn = document.getElementById('submitBtn');
-        const submitText = document.getElementById('submitText');
-        const loading = document.getElementById('loading');
-        const successMessage = document.getElementById('successMessage');
-        const errorMessage = document.getElementById('errorMessage');
-        const formContainer = document.getElementById('formContainer');
-        const confirmationPage = document.getElementById('confirmationPage');
-
-        function showForm() {
-            formContainer.classList.remove('hide');
-            confirmationPage.classList.remove('show');
-            successMessage.style.display = 'none';
-            errorMessage.style.display = 'none';
-        }
-
-        function showConfirmation() {
-            formContainer.classList.add('hide');
-            confirmationPage.classList.add('show');
-        }
-
-        // Update content type options based on channel selection
-        const channelSelect = document.getElementById('channel');
-        const contentTypeSelect = document.getElementById('contentType');
-
-        const contentTypeMapping = {
-            'Instagram': ['Single post', 'Carousel', 'Short-form video'],
-            'Youtube': ['Long-form video', 'Short-form video'],
-            'Tiktok': ['Short-form video'],
-            'Email': ['Newsletter'],
-            'The Vocal Party': ['Newsletter', 'Blog post'],
-            'Podcast': ['Podcast episode']
-        };
-
-        channelSelect.addEventListener('change', function() {
-            const selectedChannel = this.value;
-            const contentTypes = contentTypeMapping[selectedChannel] || [];
-            
-            // Clear current options except the first one
-            contentTypeSelect.innerHTML = '<option value="">Select format...</option>';
-            
-            // Add all available content types from your database
-            const allTypes = ['Single post', 'Carousel', 'Short-form video', 'Long-form video', 'Newsletter', 'Blog post', 'Podcast episode', 'Static pin', 'Video pin', 'Idea pin'];
-            
-            allTypes.forEach(type => {
-                const option = document.createElement('option');
-                option.value = type;
-                option.textContent = type;
-                // Highlight recommended types for the channel
-                if (contentTypes.includes(type)) {
-                    option.textContent += ' ⭐';
-                }
-                contentTypeSelect.appendChild(option);
-            });
-        });
-
-        form.addEventListener('submit', async function(e) {
-            e.preventDefault();
-            
-            // Show loading state
-            submitBtn.disabled = true;
-            submitText.style.opacity = '0';
-            loading.style.display = 'block';
-            
-            // Hide any previous messages
-            successMessage.style.display = 'none';
-            errorMessage.style.display = 'none';
-
-            // Get form data
-            const formData = {
-                title: document.getElementById('contentTitle').value,
-                channel: document.getElementById('channel').value,
-                contentType: document.getElementById('contentType').value,
-                notes: document.getElementById('notes').value || null
-            };
-
-            try {
-                const success = await addToNotion(formData);
-                
-                if (success) {
-                    form.reset();
-                    showConfirmation();
-                } else {
-                    throw new Error('Failed to add to Notion');
-                }
-                
-            } catch (error) {
-                console.error('Error:', error);
-                errorMessage.style.display = 'block';
-                errorMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            } finally {
-                // Reset button state
-                submitBtn.disabled = false;
-                submitText.style.opacity = '1';
-                loading.style.display = 'none';
-            }
-        });
-
-        // Function to add content idea directly to your Notion Content database
-        async function addToNotion(data) {
-            try {
-                // Updated with your actual Vercel URL
-                const API_ENDPOINT = 'https://contentideaform.vercel.app/api/submit-content';
-                
-                const response = await fetch(API_ENDPOINT, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        name: data.title,
-                        channel: data.channel,
-                        format: data.contentType,
-                        notes: data.notes
-                    })
-                });
-
-                if (response.ok) {
-                    const result = await response.json();
-                    console.log('✅ Successfully added to Notion:', result);
-                    
-                    // Store the success info
-                    localStorage.setItem('lastContentIdea', JSON.stringify({
-                        ...data,
-                        notionUrl: result.url,
-                        timestamp: new Date().toISOString()
-                    }));
-                    
-                    return true;
-                } else {
-                    const errorData = await response.json();
-                    console.error('❌ Notion API Error:', errorData);
-                    
-                    // Fallback: store locally for manual processing
-                    console.log('📋 FALLBACK - Copy this data to send to Claude:');
-                    console.log(`Name: ${data.title}`);
-                    console.log(`Channel: ${data.channel}`);
-                    console.log(`Format: ${data.contentType}`);
-                    if (data.notes) console.log(`Notes: ${data.notes}`);
-                    
-                    return false;
-                }
-                
-            } catch (error) {
-                console.error('❌ Connection Error:', error);
-                
-                // Fallback: show data for manual processing
-                console.log('📋 CONNECTION ISSUE - Copy this data to send to Claude:');
-                console.log(`Name: ${data.title}`);
-                console.log(`Channel: ${data.channel}`);
-                console.log(`Format: ${data.contentType}`);
-                if (data.notes) console.log(`Notes: ${data.notes}`);
-                
-                alert('Connection issue. Check console for data to send to Claude!');
-                return false;
-            }
-        }
-
-        // Add some interactive enhancements
-        const inputs = document.querySelectorAll('.form-control');
-        inputs.forEach(input => {
-            input.addEventListener('focus', function() {
-                this.parentElement.style.transform = 'translateY(-1px)';
-                this.parentElement.style.transition = 'transform 0.2s ease';
-            });
-            
-            input.addEventListener('blur', function() {
-                this.parentElement.style.transform = 'translateY(0)';
-            });
-        });
-    </script>
-</body>
-</html>
+  } catch (error) {
+    console.error('Server Error:', error);
+    return res.status(500).json({ 
+      error: 'Internal server error',
+      details: error.message,
+      stack: error.stack
+    });
+  }
+}
